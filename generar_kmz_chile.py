@@ -33,40 +33,74 @@ def ring(b):
     w, e_, s, n = b["w"], b["e"], b["s"], b["n"]
     return f"{w},{s},0 {w},{n},0 {e_},{n},0 {e_},{s},0 {w},{s},0"
 
-out, stats = [], {}
-for cid, nombre, kcol, hcol in CATS:
-    items = [c for c in capas if c["categoria"] == cid]
-    if not items: continue
-    stats[cid] = len(items)
-    out.append(f"<Folder><name>{e(nombre)} ({len(items)})</name><visibility>1</visibility>"
-               f"<Style><ListStyle><listItemType>checkHideChildren</listItemType></ListStyle></Style>"
-               f"<Style id='p_{cid}'><LabelStyle><scale>0</scale></LabelStyle><LineStyle><color>{kcol}</color><width>2</width></LineStyle>"
-               f"<PolyStyle><color>22{kcol[2:]}</color><outline>1</outline></PolyStyle>"
-               f"<BalloonStyle><text>$[description]</text><bgColor>ffffffff</bgColor></BalloonStyle></Style>")
-    for c in sorted(items, key=lambda c: -c["bounds"]["n"]):
-        out.append(f"<Placemark><name>{e(c.get('informe') or c['id'])}</name><styleUrl>#p_{cid}</styleUrl>"
-                   f"<description><![CDATA[{popup(c, hcol)}]]></description>"
-                   f"<Polygon><tessellate>1</tessellate><outerBoundaryIs><LinearRing><coordinates>{ring(c['bounds'])}</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>")
-    out.append("</Folder>")
+# ── Grilla nacional IGM 1:100.000 (460 hojas, de Cartas100mil.kmz) ──
+grilla = json.load(open("grilla_igm100k.json", encoding="utf-8"))
+CATN = {c[0]: c[1] for c in CATS}
+def solape(h, b):
+    w, e_ = max(h["w"], b["w"]), min(h["e"], b["e"]); s_, n = max(h["s"], b["s"]), min(h["n"], b["n"])
+    return max(0, e_ - w) * max(0, n - s_) / ((h["e"] - h["w"]) * (h["n"] - h["s"]))
+stats = collections.Counter(c["categoria"] for c in capas if c["categoria"] != "hillshade")
+out, con, sin = [], [], []
+for h in sorted(grilla, key=lambda h: (-h["n"], h["w"])):
+    h["cartas"] = [c for c in capas if c["categoria"] in CATN and solape(h, c["bounds"]) >= 0.15]
+    (con if h["cartas"] else sin).append(h)
 
-# Acceso por carta (estrellas), una carpeta por región, solo geología
+def popup_hoja(h):
+    nom = h["nombre"] or "Hoja sin nombre"
+    items = ""
+    for cid, nombre, _, hcol in CATS:
+        cs = [c for c in h["cartas"] if c["categoria"] == cid]
+        if not cs: continue
+        items += f"<div style='margin-top:8px;font-weight:bold;color:{hcol}'>{e(nombre)}</div>"
+        for c in cs:
+            p = pdf_url(c.get("pdf"))
+            items += (f"<div style='padding:3px 0;border-bottom:1px solid #eee'>{e(c['titulo'])}"
+                      f"<br><span style='color:#777'>{e(c.get('informe') or '')} {e(c.get('anio') or '')}</span>"
+                      + (f" &nbsp;<a href='{p}'>⬇ PDF</a>" if p else "") + "</div>")
+    if not items: items = "<p style='color:#777'>Sin cartografía publicada en el visor para esta hoja.</p>"
+    return (f"<div style='width:400px;font-family:Segoe UI,Arial,sans-serif;font-size:13px'>"
+            f"<div style='background:#1a5276;color:#fff;padding:8px 10px;font-size:15px;font-weight:bold'>{e(h['codigo'])} — {e(nom)}</div>"
+            f"<div style='padding:6px 2px;color:#444'>Hoja IGM 1:100.000 · estado: {e(h['estado'] or 's/i')}</div>"
+            f"<div style='max-height:260px;overflow-y:auto'>{items}</div>"
+            f"<a href='{GEOCHILE}' style='display:inline-block;margin-top:8px;padding:7px 12px;background:#1a5276;color:#fff;text-decoration:none;border-radius:4px;font-weight:bold'>🌐 Abrir en visor GeoChile</a></div>")
+
+def hoja_pm(h, estilo):
+    r = f"{h['w']},{h['s']},0 {h['w']},{h['n']},0 {h['e']},{h['n']},0 {h['e']},{h['s']},0 {h['w']},{h['s']},0"
+    return (f"<Placemark><name>{e(h['codigo'])}</name><Snippet maxLines='0'></Snippet><styleUrl>#{estilo}</styleUrl>"
+            f"<description><![CDATA[{popup_hoja(h)}]]></description>"
+            f"<Polygon><tessellate>1</tessellate><outerBoundaryIs><LinearRing><coordinates>{r}</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>")
+
+def estilo(i, kline, kfill, w):
+    return (f"<Style id='{i}'><LabelStyle><scale>0</scale></LabelStyle><LineStyle><color>{kline}</color><width>{w}</width></LineStyle>"
+            f"<PolyStyle><color>{kfill}</color><outline>1</outline></PolyStyle>"
+            f"<BalloonStyle><text>$[description]</text><bgColor>ffffffff</bgColor></BalloonStyle></Style>")
+LIST = "<Style><ListStyle><listItemType>checkHideChildren</listItemType></ListStyle></Style>"
+out.append(f"<Folder><name>🗺️ Cartografía Geológica Interactiva — Chile ({len(grilla)} hojas)</name>"
+           "<description>Grilla de hojas IGM 1:100.000 de todo el país. Verde = hay cartografía en el visor GeoChile | Rojo = sin cartografía aún.</description>"
+           f"<visibility>1</visibility>{LIST}"
+           + estilo("h_con", "ff2e7d32", "3300b050", 2) + estilo("h_sin", "ff0000cc", "1affffff", 1.5))
+out += [hoja_pm(h, "h_con") for h in con] + [hoja_pm(h, "h_sin") for h in sin]
+out.append("</Folder>")
+
+# Acceso por hoja (estrellas) solo donde hay cartografía, una carpeta por región
 reg = collections.defaultdict(list)
-for c in capas:
-    if c["categoria"] == "geologia": reg[c.get("region") or "Sin región"].append(c)
-out.append("<Folder><name>📍 Acceso a capas por carta</name><open>0</open>"
-           "<Style><ListStyle><listItemType>checkHideChildren</listItemType></ListStyle></Style>")
+for h in con:
+    cs = [c for c in h["cartas"] if c["categoria"] == "geologia"] or h["cartas"]
+    reg[collections.Counter(c.get("region") or "Sin región" for c in cs).most_common(1)[0][0]].append(h)
+out.append(f"<Folder><name>📍 Acceso a capas por hoja ({len(con)})</name><open>0</open>{LIST}")
 for r in sorted(reg):
     out.append(f"<Folder><name>{e(r)} ({len(reg[r])})</name><visibility>0</visibility>")
-    for c in sorted(reg[r], key=lambda c: -c["bounds"]["n"]):
-        b = c["bounds"]; x, y = (b["w"] + b["e"]) / 2, (b["s"] + b["n"]) / 2
-        out.append(f"<Placemark><name>{e(c['titulo'])}</name><styleUrl>#marcador</styleUrl>"
-                   f"<description><![CDATA[{popup(c, '#cc0000')}]]></description><Point><coordinates>{x},{y},0</coordinates></Point></Placemark>")
+    for h in reg[r]:
+        out.append(f"<Placemark><name>{e(h['codigo'])} {e(h['nombre'])}</name><styleUrl>#marcador</styleUrl>"
+                   f"<description><![CDATA[{popup_hoja(h)}]]></description>"
+                   f"<Point><coordinates>{(h['w'] + h['e']) / 2},{(h['s'] + h['n']) / 2},0</coordinates></Point></Placemark>")
     out.append("</Folder>")
 out.append("</Folder>")
+stats = {"geologia": stats["geologia"], "peligros": stats["peligros"], "hojas": len(grilla), "con": len(con)}
 
 portada = (f"<div style='width:420px;font-family:Segoe UI,Arial,sans-serif;font-size:13px'><img src='quads/banner_sernageomin.jpg' width='420'/>"
            f"<h3 style='color:#1a5276'>Cartografía Geológica Interactiva — Chile</h3>"
-           f"<p>{stats.get('geologia',0)} cartas geológicas y {stats.get('peligros',0)} mapas de peligros geológicos, "
+           f"<p>{stats["geologia"]} cartas geológicas y {stats["peligros"]} mapas de peligros geológicos sobre la grilla de {stats["hojas"]} hojas 1:100.000, "
            f"con acceso al visor web y a los informes en PDF.</p>"
            f"<a href='{GEOCHILE}' style='display:inline-block;padding:9px 16px;background:#1a5276;color:#fff;text-decoration:none;border-radius:4px;font-weight:bold'>🌐 Abrir visor GeoChile</a></div>")
 kml = f"""<?xml version="1.0" encoding="UTF-8"?>
